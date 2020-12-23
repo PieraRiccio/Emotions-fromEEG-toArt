@@ -7,8 +7,15 @@ import torch
 import os
 
 from Models.loss import StyleLoss, PerceptualLoss, calc_gradient_penalty
-from Models.generate import Generator, Discriminator
+from Models.stylegan_model import Generator, Discriminator
 from Models.rgnn_model import SymSimGCNNet
+
+def accumulate(model1, model2, decay=0.5 ** (32 / (10 * 1000))):
+    par1 = dict(model1.named_parameters())
+    par2 = dict(model2.named_parameters())
+
+    for k in par1.keys():
+        par1[k].data.mul_(decay).add_(par2[k].data, alpha=1 - decay)
         
 class SVN(nn.Module):
     # def __init__(self, z_dims=32, out_class=92):
@@ -53,15 +60,22 @@ class SVN(nn.Module):
         # TODO: look at output dimension for latent vector --> or base the latent_dim on the hyperparameter tuning
         
         self.RGNN = SymSimGCNNet(62, True, torch.tensor(adjacency_matrix, dtype=torch.float32), 5, (64, 64), 4, 2, dropout=0.7, domain_adaptation="RevGrad")
-        self.G = Generator(image_size = image_size, z_dim = z_dim)
-        self.D = Discriminator(image_size = image_size)
+        self.G = Generator(image_size, style_dim=512, n_mlp=8, channel_multiplier=2)
+        self.G_ema = Generator(image_size, style_dim=512, n_mlp=8, channel_multiplier=2).eval()
+        accumulate(self.G_ema, self.G, 0)
+        self.D = Discriminator(image_size, channel_multiplier=2)
         self.aux_C = torch.load("/content/drive/MyDrive/Wiki_MART/wiki_aug_4_cleaned_results/alexnet.pth").eval()
 
         # Define optimizer
         
         self.optim_RGNN = torch.optim.Adam(self.RGNN.parameters(), lr=2e-4, weight_decay=1e-5) # TODO: but the parameters need to be tuned in a separate experiment
-        self.optim_G = torch.optim.Adam(self.G.parameters(), lr=1e-4, weight_decay=0.0001)
-        self.optim_D = torch.optim.Adam(self.D.parameters(), lr=1e-4, weight_decay=0.0001)
+        
+        g_reg_every = 4 #TODO: decide if to pass as parameters
+        d_reg_every = 16
+        g_reg_ratio = g_reg_every / (g_reg_every + 1)
+        d_reg_ratio = d_reg_every / (d_reg_every + 1)
+        self.optim_G = torch.optim.Adam(self.G.parameters(), lr=0.002 * g_reg_ratio, betas=(0 ** g_reg_ratio, 0.99 ** g_reg_ratio),)
+        self.optim_D = torch.optim.Adam(discriminator.parameters(), lr=0.002 * d_reg_ratio, betas=(0 ** d_reg_ratio, 0.99 ** d_reg_ratio),)
 
         # Define criterion
         
