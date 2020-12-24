@@ -5,8 +5,9 @@ import numpy as np
 import itertools
 import torch
 import os
+import random
 
-from Models.loss import StyleLoss, PerceptualLoss, calc_gradient_penalty
+from Models.loss import StyleLoss, PerceptualLoss, calc_gradient_penalty, GeneratorLoss, DiscriminatorLoss
 from Models.stylegan_model import Generator, Discriminator
 from Models.rgnn_model import SymSimGCNNet
 
@@ -44,8 +45,10 @@ class SVN(nn.Module):
         self.loss_list_nodeDAT = []
         self.loss_list_L1Reg = []
         self.loss_list_style = []
-        self.loss_list_adver_g = []
+        self.loss_list_adver_g = [] 
         self.loss_list_adver_d = []
+        self.loss_list_reg_g = [] 
+        self.loss_list_reg_d = []
         self.loss_list_class = []
         
         self.Loss_list_KL = []
@@ -54,6 +57,8 @@ class SVN(nn.Module):
         self.Loss_list_style = []
         self.Loss_list_adver_g = []
         self.Loss_list_adver_d = []
+        self.Loss_list_reg_g = []
+        self.Loss_list_reg_d = []
         self.Loss_list_class = []
 
         # Define network structure
@@ -61,10 +66,12 @@ class SVN(nn.Module):
         
         self.RGNN = SymSimGCNNet(62, True, torch.tensor(adjacency_matrix, dtype=torch.float32), 5, (64, 64), 4, 2, dropout=0.7, domain_adaptation="RevGrad")
         self.G = Generator(image_size, style_dim=512, n_mlp=8, channel_multiplier=2)
+
         self.G_ema = Generator(image_size, style_dim=512, n_mlp=8, channel_multiplier=2).eval()
         accumulate(self.G_ema, self.G, 0)
+
         self.D = Discriminator(image_size, channel_multiplier=2)
-        self.aux_C = torch.load("/content/drive/MyDrive/Wiki_MART/wiki_aug_4_cleaned_results/alexnet.pth").eval()
+        self.aux_C = torch.load("/content/drive/MyDrive/Pieroncina/alexnet.pth").eval()
 
         # Define optimizer
         
@@ -75,7 +82,7 @@ class SVN(nn.Module):
         g_reg_ratio = g_reg_every / (g_reg_every + 1)
         d_reg_ratio = d_reg_every / (d_reg_every + 1)
         self.optim_G = torch.optim.Adam(self.G.parameters(), lr=0.002 * g_reg_ratio, betas=(0 ** g_reg_ratio, 0.99 ** g_reg_ratio),)
-        self.optim_D = torch.optim.Adam(discriminator.parameters(), lr=0.002 * d_reg_ratio, betas=(0 ** d_reg_ratio, 0.99 ** d_reg_ratio),)
+        self.optim_D = torch.optim.Adam(self.D.parameters(), lr=0.002 * d_reg_ratio, betas=(0 ** d_reg_ratio, 0.99 ** d_reg_ratio),)
 
         # Define criterion
         
@@ -84,16 +91,38 @@ class SVN(nn.Module):
         # self.L1 = L1Reg(self.alpha) # TODO: alpha has to be tuned
         self.vgg = models.vgg19(pretrained=True).features.eval()
         self.crit_style = StyleLoss(vgg_module = self.vgg) # Mysterious style loss
-        self.crit_adver = nn.BCELoss()                     # Adversarial loss
+        self.d_logistic_loss = DiscriminatorLoss().D_logistic()
+        self.d_reg = DiscriminatorLoss().D_reg()
+        self.g_nonsaturating_loss = GeneratorLoss().G_nonsaturating_loss()
+        self.g_reg = GeneratorLoss().G_reg()
+
         # TODO: understand if AlexNet needs regression or not, and its shape output
         if self.regression:
             self.crit_class = nn.MSELoss()
         else:
             self.crit_class = nn.CrossEntropyLoss()
-        self.z = torch.randn([16, self.z_dim, 8, 8]).cuda()#TODO: passare batch size
+        self.mixing_noise(16, 512, prob=0.9)
 
-    def resample(self): #noise
-        self.z = torch.randn([16, self.z_dim, 8, 8]).cuda()#TODO: passare batch size
+
+    def make_noise(self, batch, latent_dim, n_noise):
+        if n_noise == 1:
+            return torch.randn(batch, latent_dim).cuda() 
+        noises = torch.randn(n_noise, batch, latent_dim).cuda().unbind(0)
+
+        return noises
+
+    def mixing_noise(self, batch, latent_dim, prob):
+      if prob > 0 and random.random() < prob:
+        self.z = self.make_noise(batch, latent_dim, 2)
+
+      else:
+        self.z = [self.make_noise(batch, latent_dim, 1)]
+
+    def get_random_labels(self, batch, n_labels):
+      # this is just to test, not needed in the real implementation
+      labels = (torch.rand(batch)*n_labels).long()
+      labels = torch.nn.functional.one_hot(labels, num_classes=n_labels).float().cuda()
+      return labels
 
     #def forward(self, spec_in):
     def forward(self, eeg_in, beta=0): # TODO: capire bene beta
@@ -101,7 +130,9 @@ class SVN(nn.Module):
         # 1. Generate the latent vector from the eeg signals using RGNN and classify it
         eeg_latent, eeg_out, domain_out = self.RGNN(eeg_in, beta)
         eeg_latent = eeg_latent.reshape(eeg_latent.shape[0],1,8,8) # TODO: am I sure about these dimensions?
-        fake_style = self.G(eeg_latent, self.z)
+
+        eeg_latent = self.get_random_labels(16, 4) # THIS IS JUST TO TEST
+        fake_style = self.G(self.z, eeg_latent) # TODO: to test, the eeg labels will just be the fake labels
 
         # 2. Emotion classification with auxiliary classifier
         pred_emo = self.aux_C(fake_style) 

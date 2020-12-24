@@ -118,7 +118,47 @@ class PerceptualLoss(nn.Module): # *?
                 model.add_module('relu' + str(i), layer)
         return perceptual_loss
     
-    
+class DiscriminatorLoss():
+  """
+  StyleGAN2 Discriminator
+  """
+  class D_logistic(nn.Module):
+    def forward(self, real_pred, fake_pred):
+        real_loss = F.softplus(-real_pred)
+        fake_loss = F.softplus(fake_pred)
+
+        return real_loss.mean() + fake_loss.mean()
+
+  class D_reg(nn.Module):
+    def forward(self, real_pred, real_img):
+      grad_real, = autograd.grad(outputs=real_pred.sum(), inputs=real_img, create_graph=True)
+      grad_penalty = grad_real.pow(2).reshape(grad_real.shape[0], -1).sum(1).mean()
+
+      return grad_penalty
+
+class GeneratorLoss():
+  """
+  StyleGAN2 Discriminator
+  """
+  class G_nonsaturating_loss(nn.Module):
+    def forward(self, fake_pred):
+      loss = F.softplus(-fake_pred).mean()
+
+      return loss
+  
+  class G_reg(nn.Module):
+    def forward(self, fake_img, latents, mean_path_length, decay=0.01):
+      noise = torch.randn_like(fake_img) / math.sqrt(fake_img.shape[2] * fake_img.shape[3])
+      grad, = autograd.grad(outputs=(fake_img * noise).sum(), inputs=latents, create_graph=True)
+      path_lengths = torch.sqrt(grad.pow(2).sum(2).mean(1))
+      path_mean = mean_path_length + decay * (path_lengths.mean() - mean_path_length)
+      path_penalty = (path_lengths - path_mean).pow(2).mean()
+
+      return path_penalty, path_mean.detach(), path_lengths
+
+  
+  
+      
 """class L1Reg(nn.Module):
     def __init__(self, alpha=0.001):
         self.alpha = alpha
