@@ -4,6 +4,8 @@ from torch import autograd
 import torch.nn.functional as F
 import torch
 
+import math
+
 # vgg = models.vgg19(pretrained=True).features.eval()
 
 def calc_gradient_penalty(netD, real_data, fake_data):
@@ -77,7 +79,7 @@ class StyleLoss(nn.Module):
             Arg:    input   (torch.Tensor)  - The tensor you want to compute
         """
         a, b, c, d = input.size()
-        feature = input.view(a * b, c * d)
+        feature = input.reshape(a * b, c * d)
         gram = torch.mm(feature, feature.t())
         gram /= (a * b * c * d)
         return gram

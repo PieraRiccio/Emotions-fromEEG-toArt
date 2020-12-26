@@ -7,9 +7,13 @@ import torch
 import os
 import random
 
+from torchvision import transforms, utils
+
 from Models.loss import StyleLoss, PerceptualLoss, calc_gradient_penalty, GeneratorLoss, DiscriminatorLoss
 from Models.stylegan_model import Generator, Discriminator
 from Models.rgnn_model import SymSimGCNNet
+
+from non_leaking import augment, AdaptiveAugment
 
 def accumulate(model1, model2, decay=0.5 ** (32 / (10 * 1000))):
     par1 = dict(model1.named_parameters())
@@ -20,16 +24,16 @@ def accumulate(model1, model2, decay=0.5 ** (32 / (10 * 1000))):
         
 class SVN(nn.Module):
     # def __init__(self, z_dims=32, out_class=92):
-    def __init__(self, z_dim=32, image_size = 128, out_class=92, regression = False, adjacency_matrix = torch.eye(62)):
+    def __init__(self, image_size=128, out_class=4, regression=False, adjacency_matrix=torch.eye(62), batch=16):
         """
             The constructor of style visualization network
             There are x loss term:
             write them
         """
         super().__init__()
-        self.z_dim = z_dim
         self.regression = regression
         self.adjacency_matrix = adjacency_matrix
+        self.batch = batch
 
         # Define the loss term weight
         
@@ -71,18 +75,21 @@ class SVN(nn.Module):
         accumulate(self.G_ema, self.G, 0)
 
         self.D = Discriminator(image_size, channel_multiplier=2)
+        self.ada_augment = AdaptiveAugment(ada_aug_target=0.6, ada_aug_len=500*1000, update_every=256, device=torch.device("cuda"))
+        self.ada_aug_p = 0
+
         self.aux_C = torch.load("/content/drive/MyDrive/Pieroncina/alexnet.pth").eval()
 
         # Define optimizer
         
         self.optim_RGNN = torch.optim.Adam(self.RGNN.parameters(), lr=2e-4, weight_decay=1e-5) # TODO: but the parameters need to be tuned in a separate experiment
         
-        g_reg_every = 4 #TODO: decide if to pass as parameters
-        d_reg_every = 16
-        g_reg_ratio = g_reg_every / (g_reg_every + 1)
-        d_reg_ratio = d_reg_every / (d_reg_every + 1)
-        self.optim_G = torch.optim.Adam(self.G.parameters(), lr=0.002 * g_reg_ratio, betas=(0 ** g_reg_ratio, 0.99 ** g_reg_ratio),)
-        self.optim_D = torch.optim.Adam(self.D.parameters(), lr=0.002 * d_reg_ratio, betas=(0 ** d_reg_ratio, 0.99 ** d_reg_ratio),)
+        self.g_reg_every = 4 #TODO: decide if to pass as parameters
+        self.d_reg_every = 16
+        self.g_reg_ratio = self.g_reg_every / (self.g_reg_every + 1)
+        self.d_reg_ratio = self.d_reg_every / (self.d_reg_every + 1)
+        self.optim_G = torch.optim.Adam(self.G.parameters(), lr=0.002 * self.g_reg_ratio, betas=(0 ** self.g_reg_ratio, 0.99 ** self.g_reg_ratio),)
+        self.optim_D = torch.optim.Adam(self.D.parameters(), lr=0.002 * self.d_reg_ratio, betas=(0 ** self.d_reg_ratio, 0.99 ** self.d_reg_ratio),)
 
         # Define criterion
         
@@ -101,7 +108,8 @@ class SVN(nn.Module):
             self.crit_class = nn.MSELoss()
         else:
             self.crit_class = nn.CrossEntropyLoss()
-        self.mixing_noise(16, 512, prob=0.9)
+        self.mixing_noise(self.batch, 512, prob=0.9)
+        self.mean_path_length = 0
 
 
     def make_noise(self, batch, latent_dim, n_noise):
@@ -125,18 +133,23 @@ class SVN(nn.Module):
       return labels
 
     #def forward(self, spec_in):
-    def forward(self, eeg_in, beta=0): # TODO: capire bene beta
+    def forward(self, eeg_in, beta=0, return_latents=False): # TODO: capire bene beta
                 
         # 1. Generate the latent vector from the eeg signals using RGNN and classify it
         eeg_latent, eeg_out, domain_out = self.RGNN(eeg_in, beta)
         eeg_latent = eeg_latent.reshape(eeg_latent.shape[0],1,8,8) # TODO: am I sure about these dimensions?
 
-        eeg_latent = self.get_random_labels(16, 4) # THIS IS JUST TO TEST
-        fake_style = self.G(self.z, eeg_latent) # TODO: to test, the eeg labels will just be the fake labels
+        # 2. Sample the input of the generator (noise and eeg latents)
+        self.mixing_noise(self.batch, 512, prob=0.9)
+        eeg_latent = self.get_random_labels(self.batch, 4) # THIS IS JUST TO TEST
+        fake_style, latents = self.G(self.z, eeg_latent, return_latents=return_latents) # TODO: to test, the eeg labels will just be the fake labels
 
         # 2. Emotion classification with auxiliary classifier
         pred_emo = self.aux_C(fake_style) 
 
+        if return_latents:
+          return eeg_out, fake_style, pred_emo, eeg_latent, domain_out, latents
+        
         return eeg_out, fake_style, pred_emo, eeg_latent, domain_out
 
     # ==============================================================================
@@ -234,55 +247,89 @@ class SVN(nn.Module):
         
         loss_e.backward()
 
-    def backward_G(self, true_style, fake_style, pred_emo, gt_emo):
+    def backward_G(self, eeg_in, true_style, fake_style, fake_labels, gt_emo, pred_emo, g_regularize):
         """
         Adversarial loss + emotion classification loss (from painting) + Style loss
+        + Regularization loss (every now and then)
         """
-        # ---------------------------------------------------------------
-        # Update for adversarial loss
-        # ---------------------------------------------------------------
-        ##### WGAN-GP
-        # loss_adv = -self.D(fake_style).mean() * self.lambda_adver
-        ##### Relativistic LSGAN
-        r_logit = self.D(true_style)
-        f_logit = self.D(fake_style)
-        loss_adv = ((torch.mean((r_logit - torch.mean(f_logit) + 1) ** 2) + torch.mean((f_logit - torch.mean(r_logit) - 1) ** 2))/2) * self.lambda_adver
+
+        # Adversarial loss
+
+        # TODO: ADA
+        fake_style, _ = augment(fake_style, self.ada_aug_p)
+
+        fake_pred = self.D(fake_style, fake_labels)
+        loss_adv = self.g_nonsaturating_loss(fake_pred)
         self.loss_list_adver_g.append(loss_adv.item())
 
         # Emotion classification loss (auxiliary classifier)
         loss_class = self.crit_class(pred_emo, gt_emo) * self.lambda_class 
         self.loss_list_class.append(loss_class.item())
 
-        # Update for style loss
+        # Style loss
         loss_style = self.crit_style(fake_style, true_style) * self.lambda_style
         self.loss_list_style.append(loss_style.item())
 
         # Merge the several loss terms
-        loss_g = loss_style + loss_class + loss_adv
+        loss_g = loss_adv #+ loss_style + loss_class
+        self.optim_G.zero_grad()
         loss_g.backward()
-        
-    def backward_D(self, true_style, fake_style):
-        """
-        Adversarial loss
-        """
-        loss_adv = 0.0
-        ##### WGAN-GP
-        # for iter_d in range(3):
-        #     r_logit = self.D(true_style)
-        #     f_logit = self.D(fake_style)
-        #     gradient_penalty = calc_gradient_penalty(self.D, true_style, fake_style)
-        #     loss_adv = loss_adv + (f_logit.mean() - r_logit.mean() + gradient_penalty) * self.lambda_adver
-        
-        ##### Relativistic LSGAN
-        r_logit = self.D(true_style)
-        f_logit = self.D(fake_style)
-        loss_adv = loss_adv + ((torch.mean((r_logit - torch.mean(f_logit) - 1) ** 2) + torch.mean((f_logit - torch.mean(r_logit) + 1) ** 2))/2) * self.lambda_adver
+        self.optim_G.step()
 
+        # Regularization loss
+
+        r1_loss = torch.tensor(0.0).cuda()
+        if g_regularize:
+          path_batch_size = max(1, self.batch // 2)
+          _, fake_style, _, fake_labels, _, latents = self.forward(eeg_in, return_latents=True) # da rivedere con le eeg, probabilmente non e' da fare ma usare stesso style label di sopra
+
+          path_loss, self.mean_path_length, path_lengths = self.g_reg(fake_style, latents, self.mean_path_length)
+
+          self.optim_G.zero_grad()
+          weighted_path_loss = 2 * self.g_reg_every * path_loss
+          weighted_path_loss += 0 * fake_style[0, 0, 0, 0] # mi sento presa per il culo.
+
+          weighted_path_loss.backward()
+
+          self.optim_G.step()
+
+          #mean_path_length_avg = (reduce_sum(mean_path_length).item() / get_world_size()) #roba di parallelizzazione
+        self.loss_list_reg_g.append(path_loss.item())
+        
+    def backward_D(self, true_style, fake_style, true_labels, fake_labels, d_regularize): # TODO: in the final implementation, fake and real labels will be the same
+        """
+        Adversarial loss + regularization loss
+        """
+        # Adversarial loss
+        # TODO: ADA
+        true_style, _ = augment(true_style, self.ada_aug_p)
+        fake_style, _ = augment(fake_style, self.ada_aug_p)
+
+        fake_pred = self.D(fake_style, fake_labels) # real labels in final implementation
+        true_pred = self.D(true_style, true_labels)
+        loss_adv = self.d_logistic_loss(true_pred, fake_pred) # *self.lambda_adver
         self.loss_list_adver_d.append(loss_adv.item())
+    
+        self.optim_D.zero_grad()
         loss_adv.backward()
+        self.optim_D.step()
+
+        self.ada_aug_p = self.ada_augment.tune(true_pred)
+
+        # Regularization loss
+        r1_loss = torch.tensor(0.0).cuda()
+        if d_regularize:
+          true_style.requires_grad = True
+          true_pred = self.D(true_style, true_labels)
+          r1_loss = self.d_reg(true_pred, true_style)
+
+          self.optim_D.zero_grad()
+          (10 / 2 * r1_loss * self.d_reg_every + 0 * true_pred[0]).backward()
+          self.optim_D.step()
+        self.loss_list_reg_d.append(r1_loss.item())
 
     #def backward(self, in_spec, true_style, gt_year, pos = None, neg = None):
-    def backward(self, eeg_in, true_style, gt_emo, domain_label): # TODO: do I have to put batch size also?
+    def backward(self, eeg_in, true_style, gt_emo, domain_label, epoch): # TODO: do I have to put batch size also?
         """
             Update the parameters of whole model
            
@@ -295,16 +342,22 @@ class SVN(nn.Module):
         
         # Update discriminator
         eeg_out, fake_style, pred_emo, eeg_latent, domain_out = self.forward(eeg_in)
-        self.optim_D.zero_grad()
-        self.backward_D(true_style, fake_style)
-        self.optim_D.step()
+        true_labels = torch.nn.functional.one_hot(gt_emo,num_classes=4).float()
+        fake_labels = eeg_latent
+        
+        d_regularize = epoch % self.d_reg_every == 0 # passare d_regularize
+        self.backward_D(true_style, fake_style, true_labels, fake_labels, d_regularize) # TODO CAMBIARE PARAMETRI
 
         # Update generator
         eeg_out, fake_style, pred_emo, eeg_latent, domain_out = self.forward(eeg_in)
-        self.optim_G.zero_grad()
-        self.backward_G(true_style, fake_style, pred_emo, gt_emo)
-        self.optim_G.step()
-        
+        true_labels = torch.nn.functional.one_hot(gt_emo,num_classes=4).float()
+        fake_labels = eeg_latent
+
+        g_regularize = epoch % self.g_reg_every == 0
+        self.backward_G(eeg_in, true_style, fake_style, fake_labels, gt_emo, pred_emo, g_regularize)
+
+        accumulate(self.G_ema, self.G)
+
         # Update RGNN
         gt_KL = eeg_in["y"]
         eeg_out, fake_style, pred_emo, eeg_latent, domain_out = self.forward(eeg_in)
