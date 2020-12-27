@@ -111,6 +111,11 @@ class SVN(nn.Module):
         self.mixing_noise(self.batch, 512, prob=0.9)
         self.mean_path_length = 0
 
+        self.sample_z = torch.randn(64, 512).cuda()
+        self.sample_labels = torch.tensor([0,1,2,3]).repeat(64//4)
+        self.sample_labels = torch.nn.functional.one_hot(self.sample_labels, num_classes=4).float().cuda()
+
+
 
     def make_noise(self, batch, latent_dim, n_noise):
         if n_noise == 1:
@@ -176,25 +181,37 @@ class SVN(nn.Module):
         else:
             print("Pre-trained model {} is not exist...".format(path))
 
-    def save(self, path):
+    def save(self, path, i):
         # Record the parameters TODO
         state = {
-            'U': self.U.state_dict(),
+            #'U': self.U.state_dict(),
             'G': self.G.state_dict(),
             'D': self.D.state_dict(),
-            'C': self.C.state_dict(),
+            'G_ema': self.G_ema.state_dict(),
+            #'C': self.C.state_dict(),
         }
 
         # Record the optimizer and loss
-        state['optim_U'] = self.optim_U.state_dict()
+        #state['optim_U'] = self.optim_U.state_dict()
         state['optim_G'] = self.optim_G.state_dict()
         state['optim_D'] = self.optim_D.state_dict()
-        state['optim_C'] = self.optim_C.state_dict()
+        #state['optim_C'] = self.optim_C.state_dict()
+
+        state["ada_aug_p"] = self.ada_aug_p
+
         for key in self.__dict__:
             if len(key) > 10:
                 if key[1:9] == 'oss_list':
                     state[key] = getattr(self, key)
-        torch.save(state, path)
+        torch.save(state, f"{path}/{str(i).zfill(6)}.pt")
+
+    def save_images(self, path, i):
+      with torch.no_grad():
+        self.G_ema.eval()
+        sample, _ = self.G_ema([self.sample_z], self.sample_labels)
+        utils.save_image(sample, f"{path}/{str(i).zfill(6)}.png", nrow=8, normalize=True, range=(-1, 1),)
+
+
 
     # ==============================================================================
     #   Set & Get
@@ -278,7 +295,7 @@ class SVN(nn.Module):
 
         # Regularization loss
 
-        r1_loss = torch.tensor(0.0).cuda()
+        path_loss = torch.tensor(0.0).cuda()
         if g_regularize:
           path_batch_size = max(1, self.batch // 2)
           _, fake_style, _, fake_labels, _, latents = self.forward(eeg_in, return_latents=True) # da rivedere con le eeg, probabilmente non e' da fare ma usare stesso style label di sopra
@@ -329,7 +346,7 @@ class SVN(nn.Module):
         self.loss_list_reg_d.append(r1_loss.item())
 
     #def backward(self, in_spec, true_style, gt_year, pos = None, neg = None):
-    def backward(self, eeg_in, true_style, gt_emo, domain_label, epoch): # TODO: do I have to put batch size also?
+    def backward(self, eeg_in, true_style, gt_emo, domain_label, i): # TODO: do I have to put batch size also?
         """
             Update the parameters of whole model
            
@@ -345,7 +362,7 @@ class SVN(nn.Module):
         true_labels = torch.nn.functional.one_hot(gt_emo,num_classes=4).float()
         fake_labels = eeg_latent
         
-        d_regularize = epoch % self.d_reg_every == 0 # passare d_regularize
+        d_regularize = i % self.d_reg_every == 0 # passare d_regularize
         self.backward_D(true_style, fake_style, true_labels, fake_labels, d_regularize) # TODO CAMBIARE PARAMETRI
 
         # Update generator
@@ -353,7 +370,7 @@ class SVN(nn.Module):
         true_labels = torch.nn.functional.one_hot(gt_emo,num_classes=4).float()
         fake_labels = eeg_latent
 
-        g_regularize = epoch % self.g_reg_every == 0
+        g_regularize = i % self.g_reg_every == 0
         self.backward_G(eeg_in, true_style, fake_style, fake_labels, gt_emo, pred_emo, g_regularize)
 
         accumulate(self.G_ema, self.G)
