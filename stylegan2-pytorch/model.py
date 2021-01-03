@@ -362,6 +362,7 @@ class Generator(nn.Module):
         channel_multiplier=2,
         blur_kernel=[1, 3, 3, 1],
         lr_mlp=0.01,
+        n_labels=4
     ):
         super().__init__()
 
@@ -370,7 +371,7 @@ class Generator(nn.Module):
         self.style_dim = style_dim
 
         self.pixel_norm = PixelNorm()
-        self.label_embed = EqualLinear(4, style_dim) # TODO: pass n. of labels
+        self.label_embed = EqualLinear(n_labels, style_dim) # TODO: pass n. of labels
 
         layers = [EqualLinear(
             style_dim*2, style_dim, lr_mul=lr_mlp, activation="fused_lrelu"
