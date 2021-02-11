@@ -614,7 +614,7 @@ class ResBlock(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self, size, channel_multiplier=2, blur_kernel=[1, 3, 3, 1]):
+    def __init__(self, size, channel_multiplier=2, blur_kernel=[1, 3, 3, 1], n_labels=4):
         super().__init__()
 
         channels = {
@@ -630,7 +630,7 @@ class Discriminator(nn.Module):
         }
 
         self.pixel_norm = PixelNorm()
-        self.label_embed = EqualLinear(4, channels[4]) # TODO: pass n. of labels
+        self.label_embed = EqualLinear(n_labels, channels[4]) # TODO: pass n. of labels
 
         convs = [ConvLayer(3, channels[size], 1)]
 
