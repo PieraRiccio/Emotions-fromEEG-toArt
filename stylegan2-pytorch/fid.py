@@ -10,6 +10,10 @@ from tqdm import tqdm
 from model import Generator
 from calc_inception import load_patched_inception_v3
 
+class AttrDict(dict):
+    def __init__(self, *args, **kwargs):
+        super(AttrDict, self).__init__(*args, **kwargs)
+        self.__dict__ = self
 
 @torch.no_grad()
 def extract_feature_from_samples(
@@ -22,7 +26,15 @@ def extract_feature_from_samples(
 
     for batch in tqdm(batch_sizes):
         latent = torch.randn(batch, 512, device=device)
-        img, _ = g([latent], truncation=truncation, truncation_latent=truncation_latent)
+        rgnn_latent = torch.stack([
+          torch.tensor(np.load("sad_latent.npy"), device=device),
+          torch.tensor(np.load("neg_aroused_latent.npy"), device=device),
+          torch.tensor(np.load("positive_latent.npy"), device=device)
+        ])
+        rgnn_latent = torch.cat(21*[rgnn_latent])
+        rgnn_latent = torch.cat([rgnn_latent, torch.tensor(np.load("sad_latent.npy"), device=device)[None, :]])
+        rgnn_latent = rgnn_latent[:len(latent)]
+        img, _ = g([latent], rgnn_latent, truncation=truncation, truncation_latent=truncation_latent)
         feat = inception(img)[0].view(img.shape[0], -1)
         features.append(feat.to("cpu"))
 
@@ -96,7 +108,7 @@ if __name__ == "__main__":
 
     ckpt = torch.load(args.ckpt)
 
-    g = Generator(args.size, 512, 8).to(device)
+    g = Generator(args.size, 512, 8, n_labels=50).to(device)
     g.load_state_dict(ckpt["g_ema"])
     g = nn.DataParallel(g)
     g.eval()
@@ -125,5 +137,7 @@ if __name__ == "__main__":
         real_cov = embeds["cov"]
 
     fid = calc_fid(sample_mean, sample_cov, real_mean, real_cov)
-
+    
     print("fid:", fid)
+    np.save("/content/drive/MyDrive/Pieroncina/experiment_on_piera/stylegan2/test_0/fid/{}.npy".format(args.ckpt.split("/models/")[1].split(".")[0]), np.array([fid]))
+
