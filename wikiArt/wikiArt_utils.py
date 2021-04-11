@@ -32,7 +32,7 @@ def download_wikiArtEmotion(path_wikiart):
       flag=len(os.listdir(os.path.join(path_wikiart,group)))
       link=row["Image URL"]
       dst=os.path.join(path_wikiart,group,"{:04d}_{}".format(counter[group],link.split("/")[-1]))
-      !wget "{link}" -O "{dst}" --no-check-certificate
+      os.system("wget '{}' -O '{}' --no-check-certificate".format(link,dst))
       if(flag==len(os.listdir(os.path.join(path_wikiart,group)))):
         raise Exception("Something went wrong with the following link: {}".format(link))
       counter[group]+=1
