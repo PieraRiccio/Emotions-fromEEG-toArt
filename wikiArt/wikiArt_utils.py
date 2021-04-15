@@ -85,8 +85,8 @@ def preprocess_wikiart(path_wikiart):
     for f in os.listdir(os.path.join(path_wikiart,folder)):
       img_path = os.path.join(path_wikiart,folder,f)
       img = Image.open(img_path).convert("RGB")
-      img = resize(img, 256, InterpolationMode.LANCZOS)
-      img = center_crop(img, 256)
+      img = resize(img, 128, InterpolationMode.LANCZOS)
+      img = center_crop(img, 128)
       buffer = BytesIO()
       img.save(buffer, format="jpeg", quality=100)
       val = buffer.getvalue()
