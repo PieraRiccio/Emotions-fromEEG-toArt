@@ -213,7 +213,7 @@ def training_routine(model, epochs, train_loader, val_loader, ckpt_folder):
     if(best_acc==None or result['Total']<best_acc):
       best_acc=result['Total']
       best_model_dict = copy.deepcopy(model.state_dict())
-      torch.save(best_model_dict,os.path.join(ckpt_folder,"rgnn.pth"))
+      torch.save(model,os.path.join(ckpt_folder,"rgnn.pth"))
     epoch_end(epoch, result)
     history.append(result)
   return history, best_model_dict
