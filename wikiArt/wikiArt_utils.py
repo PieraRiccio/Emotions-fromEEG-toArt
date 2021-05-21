@@ -30,7 +30,7 @@ def download_wikiArtEmotion(path_wikiart):
     group=getGroup(row,groups)
     if group is not None:
       flag=len(os.listdir(os.path.join(path_wikiart,group)))
-      link=row["Image URL"]
+      link=row["Image URL"].replace("use2-","")
       dst=os.path.join(path_wikiart,group,"{:04d}_{}".format(counter[group],link.split("/")[-1]))
       os.system("wget '{}' -O '{}' --no-check-certificate".format(link,dst))
       if(flag==len(os.listdir(os.path.join(path_wikiart,group)))):
@@ -73,7 +73,7 @@ def data_augmentation(path_wikiart,groups_to_augment,max):
 #####PREPROCESS#####
 ####################
 
-def preprocess_wikiart(path_wikiart):
+def preprocess_wikiart(path_wikiart,size=128):
   wikiArt_dict = {
       "anger_disgust": {"images" : [], "labels" : []},
       "sadness_pessimism": {"images" : [], "labels" : []},
@@ -85,8 +85,8 @@ def preprocess_wikiart(path_wikiart):
     for f in os.listdir(os.path.join(path_wikiart,folder)):
       img_path = os.path.join(path_wikiart,folder,f)
       img = Image.open(img_path).convert("RGB")
-      img = resize(img, 128, InterpolationMode.LANCZOS)
-      img = center_crop(img, 128)
+      img = resize(img, size, InterpolationMode.LANCZOS)
+      img = center_crop(img, size)
       buffer = BytesIO()
       img.save(buffer, format="jpeg", quality=100)
       val = buffer.getvalue()
