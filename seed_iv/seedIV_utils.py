@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import os
 import scipy.io
-from keras.utils import to_categorical
+from tensorflow.keras.utils import to_categorical
 from scipy.spatial import distance_matrix
 
 import torch
