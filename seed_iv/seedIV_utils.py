@@ -6,7 +6,7 @@ from tensorflow.keras.utils import to_categorical
 from scipy.spatial import distance_matrix
 
 import torch
-import torch_geometric
+from torch_geometric.data import Data
 
 ####################
 #####PREPROCESS#####
@@ -74,7 +74,7 @@ def load_data(seediv_path,labels):
           edge_index = torch.tensor([np.arange(62*62)//62, np.arange(62*62)%62])
           for t in range(X.shape[1]):
             x = torch.tensor(X[:, t, :]).float()
-            data.append(torch_geometric.data.Data(x=x, y=y, edge_index=edge_index))
+            data.append(Data(x=x, y=y, edge_index=edge_index))
         eeg_dict[p][emotion][phase]=data
   return eeg_dict
 
